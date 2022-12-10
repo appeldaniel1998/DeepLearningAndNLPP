@@ -6,7 +6,7 @@ import numpy as np
 class BatchGenerator:
     def __init__(self, batch_size, data):
         self.batch_size = batch_size
-        self.data = data
+        self.data = data.values.tolist()  # TODO: convert to python list
         self.batches = []
         self.contained = []
         random.seed(0)
@@ -14,13 +14,18 @@ class BatchGenerator:
             self.contained.append(i)
 
     def getRandomBatch(self):
-        size = self.batch_size
         batch = []
-        while size > 0 or len(self.contained) > len(self.data) - self.batch_size:
-            num = random.choice(self.contained)
-            self.contained.remove(num)
-            batch.append(self.data[num - 1])
-            size -= 1
+
+        leftToBatch = len(self.contained)
+        lastBatch = leftToBatch < self.batch_size
+
+        for _ in range(self.batch_size):
+            if not lastBatch:
+                num = random.choice(self.contained)
+                self.contained.remove(num)
+                batch.append(self.data[num - 1].copy())
+            else:
+                pass
 
         batch = np.array(batch)
 

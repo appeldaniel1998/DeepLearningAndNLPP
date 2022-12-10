@@ -1,48 +1,45 @@
-from BatchGenerator import BatchGenerator
 # Relevant imports
-import os as os
-import cv2
-import matplotlib.pyplot as plt
-import random
-import numpy as np
 import pandas as pd
+# noinspection PyUnresolvedReferences
 import tensorflow.compat.v1 as tf
-from sklearn.metrics import accuracy_score
 
+import Constants
+import Constants as constants
+from BatchGenerator import BatchGenerator
+
+# Exercise is strictly tf1.
 tf.disable_v2_behavior()
 
-def eval2():
+features = constants.imageSize * constants.imageSize  # used in initTF!
+
+
+def initTF(session):
     # delete the current graph
-    tf.reset_default_graph()
+    # tf.reset_default_graph()
 
     # import the graph from the file
-    # imported_graph = tf.train.import_meta_graph('saved_variable.meta')
+    # imported_graph = tf.train.import_meta_graph('saved_variable.meta') <<<<<<<<
 
-    categories = 4
-    W = tf.Variable(tf.zeros([10000, categories]))
-    b = tf.Variable(tf.zeros([categories]))
+    with tf.variable_scope(tf.get_variable_scope()):
+        W = tf.get_variable(name="W", shape=[features, constants.categories],
+                            initializer=tf.zeros_initializer, trainable=True)
+        b = tf.get_variable(name="b", shape=[constants.categories],
+                            initializer=tf.zeros_initializer, trainable=True)
 
-    # sess = tf.Session()
-    # imported_graph.restore(sess, './saved_variable')
-    saver = tf.train.Saver()
-    with tf.Session() as sess:
-        # Restore variables from disk.
-        saver.restore(sess, "./saved_variable")
-        print("W : %s" % W.eval())
-        print("b : %s" % b.eval())
+    session.run(tf.global_variables_initializer())
+    # imported_graph.restore(session, savePath)
 
     # create saver object
+    saver = tf.train.Saver()
+    try:
+        saver.restore(session, constants.savePath)  # TODO: this might need to be explicit (see line 32 <<<)
+    except:
+        print("saver.restore failed to restore!")
 
-    # saver.restore(sess, './saved_variable')
-    # numOfBatches = (len(dfTrainArray) // batchSize) + 2
+    return W, b, saver
 
-    x = []
-    y = []
-    for i in range(len(dfTestArray)):
-        x.append(dfTestArray[i].tolist().copy())
-        y.append([dfTestArray[i][-1]])
-        x[i].pop()
 
+def labelToTensor(y) -> None:
     for i in range(len(y)):
         if y[i][0] == 'Pneumonia':
             y[i] = [1, 0, 0, 0]
@@ -53,153 +50,108 @@ def eval2():
         elif y[i][0] == 'Normal':
             y[i] = [0, 0, 0, 1]
 
-    sess.run(tf.global_variables_initializer())
 
-    # categories = 4
-    x_ = tf.placeholder(tf.float32, [None, len(x[0])])
-    y_ = tf.placeholder(tf.float32, [None, categories])
+def initGraphValues(batch):
+    x = []
+    y = []
+    for i in range(len(batch)):
+        x.append(batch[i].tolist().copy())
+        y.append([batch[i][-1]])
+        x[i].pop()
 
-    z = tf.matmul(x_, W) + b
-    pred = tf.nn.softmax(tf.matmul(x_, W) + b)
-    # sess.run(tf.global_variables_initializer())
+    labelToTensor(y)
 
-    predictions = []
-    for i in range(len(x)):
-        predictions.append(np.matmul(x[i], sess.run(W)) + sess.run(b))
-    print(predictions + "\n\n")
-    print(accuracy_score(y, predictions))
+    return x, y
 
 
-def run(dfTrainArray, batchSize, bg):
-    # delete the current graph
-    tf.reset_default_graph()
+def trainOperation(W, b, session, batch):
+    # create a single batch
+    inputData, desiredOutput = initGraphValues(batch)
+    if len(inputData) == 0 or len(desiredOutput) == 0:
+        return False
 
-    # import the graph from the file
-    imported_graph = tf.train.import_meta_graph('saved_variable.meta')
+    x = tf.placeholder(tf.float32, [None, constants.imageSize * Constants.imageSize])
+    y = tf.placeholder(tf.float32, [None, constants.categories])
+    z = tf.matmul(x, W) + b
+    # pred = tf.nn.softmax(z)
+    loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(y, z))
+    # loss = tf.reduce_mean(y * tf.log(pred))
+    update = tf.train.GradientDescentOptimizer(0.01).minimize(loss)
 
-    flag = True
-    categories = 4
-    W = tf.Variable(tf.zeros([10000, categories]))
-    b = tf.Variable(tf.zeros([categories]))
+    printControl = constants.iterationsPerBatch / constants.iterationDivider
+    for i in range(constants.iterationsPerBatch):
+        session.run(update, feed_dict={x: inputData, y: desiredOutput})  # Batch Gradeient Descent
 
-    sess = tf.Session()
-    imported_graph.restore(sess, './saved_variable')
+        currLoss = loss.eval(session=session, feed_dict={x: inputData, y: desiredOutput})
+        if i % printControl == 0:
+            print("iteration " + str(i) + " loss: " + str(currLoss))
+        if currLoss < 1:
+            print("iteration " + str(i) + " loss: " + str(currLoss))
+            break
+    # tf.saved_model.simple_save(session, constants.export_dir, inputs={"x": x, "y": y}, outputs={"z": z})
+    return True
 
-    # create saver object
-    saver = tf.train.Saver()
-    numOfBatches = (len(dfTrainArray) // batchSize) + 2
-    for k in range(numOfBatches):
+
+def batchRunner(session, train_dataframes, bg):
+    """
+    The method trains the model on a generated batch
+    :param train_dataframes: dataframe array
+    :param test_dataframes: dataframe array
+    :param bg: batch generator
+    :param training: True or False
+    :return: None
+    """
+
+    (W, b, saver) = initTF(session)
+    numOfBatches = (len(train_dataframes) // constants.batchSize) + 1
+
+    for k in range(numOfBatches + 1):
         try:
-            # create a single batch
+            # Generate a batch
             batch = bg.getRandomBatch()
+            if len(batch) == 0:
+                print("Empty batch from generator - saving and stopping!")
+                saver.save(session, constants.savePath)
+                break
 
-            lst = []
-            for i in range(len(batch)):
-                lst.append(batch[i].tolist())
+            # then run the model on it
+            success = trainOperation(W, b, session, batch)
 
-            x = []
-            y = []
-            for i in range(len(batch)):
-                x.append(batch[i].tolist().copy())
-                y.append([batch[i][-1]])
-                x[i].pop()
-
-            for i in range(len(y)):
-                if y[i][0] == 'Pneumonia':
-                    y[i] = [1, 0, 0, 0]
-                elif y[i][0] == 'Tuberculosis':
-                    y[i] = [0, 1, 0, 0]
-                elif y[i][0] == 'Covid':
-                    y[i] = [0, 0, 1, 0]
-                elif y[i][0] == 'Normal':
-                    y[i] = [0, 0, 0, 1]
-
-            # categories = 4
-            x_ = tf.placeholder(tf.float32, [None, len(x[0])])
-            y_ = tf.placeholder(tf.float32, [None, categories])
-
-            # W = tf.Variable(tf.zeros([len(x[0]), categories]))
-            # b = tf.Variable(tf.zeros([categories]))
-            z = tf.matmul(x_, W) + b
-            pred = tf.nn.softmax(tf.matmul(x_, W) + b)
-            loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(y_, z))
-            update = tf.train.GradientDescentOptimizer(0.01).minimize(loss)
-
-            sess.run(tf.global_variables_initializer())
-            for i in range(iterationsPerBatch):
-                sess.run(update, feed_dict={x_: x, y_: y})  # BGD
-
-                currLoss = loss.eval(session=sess, feed_dict={x_: x, y_: y})
-                if i % 50 == 0:
-                    print("iteration " + str(i) + " loss: " + str(currLoss))
-                if currLoss < 1:
-                    print("iteration " + str(i) + " loss: " + str(currLoss))
-                    break
-            # print('\n W:', sess.run(W)[:10], ' b:', sess.run(b)[:10], "\n")
-            print("\n\nBatch " + str(k) + " Finished out of: " + str(numOfBatches) + "\n\n")
-
-            # save the variable in the disk
-            saved_path = saver.save(sess, './saved_variable')
-        except:
-            pass
+            if success:
+                print("\n\nBatch " + str(k) + " Finished out of: " + str(numOfBatches) + "\n\n")
+                saver.save(session, constants.savePath)
+        except Exception as e:
+            print("Exception in batchRunner! :\n\t", e)
+            return
 
 
-def eval():
-    # import the graph from the file
-    imported_graph = tf.train.import_meta_graph('saved_variable.meta')
+def testOperation(session, test_dataframes, bg):
+    (W, b, saver) = initTF(session)
+    # create a single batch
+    batch = bg.getRandomBatch()
+    inputData, desiredOutput = initGraphValues(batch)
+    if len(inputData) == 0 or len(desiredOutput) == 0:
+        return False
 
-    categories = 4
-    W = tf.Variable(tf.zeros([10000, categories]))
-    b = tf.Variable(tf.zeros([categories]))
-
-
-
-    sess = tf.Session()
-    imported_graph.restore(sess, './saved_variable')
-    sess.run(tf.global_variables_initializer())
-
-    WNew, bNew = sess.run([W, b])
-    print(0)
+    x = tf.placeholder(tf.float32, [None, constants.imageSize * Constants.imageSize])
+    y = tf.placeholder(tf.float32, [None, constants.categories])
+    z = tf.matmul(x, W) + b
+    pred = tf.nn.softmax(z)
+    loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(y, z))
+    # loss = tf.reduce_mean(y * tf.log(pred))
+    print("Loss:\n\t"+loss+"\n\n", "Prediction:\n\t"+pred+"\n")
 
 
 if __name__ == '__main__':
-    # dfTrain = pd.read_csv('Data/dfTrain.csv')
-    # dfTrain = dfTrain.drop(['Unnamed: 0'], axis=1)
+    training = True
 
-    dfTest = pd.read_csv('Data/dfTest.csv')
-    dfTest = dfTest.drop(['Unnamed: 0'], axis=1)
+    with tf.Session() as session:
+        # train_dataframes = pd.read_csv(constants.train16DfPath)
+        test_dataframes = pd.read_csv(constants.test16DfPath)
 
-    # Dataframe to numpy arrays
-    dfTestArray = dfTest.to_numpy()
-    # dfTrainArray = dfTrain.to_numpy()
-
-    batchSize = 200
-    iterationsPerBatch = 500
-
-    eval2()
-
-    # for i in range(50):
-    #     bg = BatchGenerator(batchSize, dfTrainArray)
-    #     run(dfTrainArray, batchSize, bg)
-
-
-
-
-
-    # for i in range(iterationsPerBatch):
-    #     sess.run(update, feed_dict={x_: x, y_: y})  # BGD
-    #
-    #     currLoss = loss.eval(session=sess, feed_dict={x_: x, y_: y})
-    #     if i % 50 == 0:
-    #         print("iteration " + str(i) + " loss: " + str(currLoss))
-    #     if currLoss < 1:
-    #         print("iteration " + str(i) + " loss: " + str(currLoss))
-    #         break
-    # # print('\n W:', sess.run(W)[:10], ' b:', sess.run(b)[:10], "\n")
-    # print("\n\nBatch " + str(k) + " Finished out of: " + str(numOfBatches) + "\n\n")
-    #
-    # # save the variable in the disk
-    # saved_path = saver.save(sess, './saved_variable')
-
-
-
+        # train_dataframes = train_dataframes.drop(['Unnamed: 0'], axis=1)
+        test_dataframes = test_dataframes.drop(['Unnamed: 0'], axis=1)
+        # bg = BatchGenerator(constants.batchSize, train_dataframes)
+        # batchRunner(session, train_dataframes, bg)  # train
+        bg = BatchGenerator(constants.batchSize, test_dataframes)
+        testOperation(session, test_dataframes, bg)  # test
